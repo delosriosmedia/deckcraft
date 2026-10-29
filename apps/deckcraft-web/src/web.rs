@@ -96,7 +96,8 @@ struct WebShell {
 /// start the show at `from`), `{deckcraft: "key", key}` (a key of the show, by its egui name:
 /// "ArrowRight", "ArrowLeft", "Home"…), `{deckcraft: "goto", slide}` and `{deckcraft: "end"}`.
 /// This page tells it `{deckcraft: "ready", version}` once and `{deckcraft: "state", slide, step,
-/// ended, slides}` whenever the show moves (`slide` null while there is no show).
+/// ended, slides, hidden}` whenever the show moves (`slide` null while there is no show; `hidden`, the
+/// indices of the hidden slides, which the show skips).
 enum MannaMsg {
     Open { name: String, bytes: Vec<u8>, from: usize },
     Key(egui::Key),
@@ -192,10 +193,15 @@ impl WebShell {
         if self.quiet && self.app.show.as_mut().is_none_or(|s| s.quiet()) {
             self.quiet = false;
         }
-        let slides = self.app.session.active().map(|d| d.doc.slides.len()).unwrap_or(0);
+        let (slides, hidden) = self
+            .app
+            .session
+            .active()
+            .map(|d| (d.doc.slides.len(), d.doc.slides.iter().enumerate().filter(|(_, s)| s.hidden).map(|(i, _)| i).collect::<Vec<_>>()))
+            .unwrap_or_default();
         let state = match self.app.show.as_ref() {
-            Some(s) => serde_json::json!({ "deckcraft": "state", "slide": s.state.slide, "step": s.state.step, "ended": s.ended, "slides": slides }),
-            None => serde_json::json!({ "deckcraft": "state", "slide": null, "step": null, "ended": false, "slides": slides }),
+            Some(s) => serde_json::json!({ "deckcraft": "state", "slide": s.state.slide, "step": s.state.step, "ended": s.ended, "slides": slides, "hidden": hidden }),
+            None => serde_json::json!({ "deckcraft": "state", "slide": null, "step": null, "ended": false, "slides": slides, "hidden": hidden }),
         };
         let text = state.to_string();
         if text != self.told {
