@@ -2,6 +2,10 @@
 
 use deckcraft_engine::Session;
 use deckcraft_ui_egui::{Inbox, InboxEvent, InboxFile, Services, SlideApp};
+use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::rc::Rc;
+
 use wasm_bindgen::JsCast as _;
 
 const PRESENTATION_EXTS: &[&str] = &["deckcraft", "pptx", "potx", "ppsx", "txt", "md"];
@@ -52,7 +56,9 @@ pub fn start() {
                     if q.contains("show") {
                         app.start_show(0, false);
                     }
-                    Ok(Box::new(WebShell { app, inbox }))
+                    let manna = listen_manna(cc.egui_ctx.clone());
+                    tell_manna(&serde_json::json!({ "deckcraft": "ready", "version": env!("CARGO_PKG_VERSION") }));
+                    Ok(Box::new(WebShell { app, inbox, manna, pending: None, told: String::new(), quiet: false }))
                 }),
             )
             .await;
@@ -74,12 +80,137 @@ fn query() -> String {
 struct WebShell {
     app: SlideApp,
     inbox: Inbox,
+    /// Messages from Manna, read on the next logic pass.
+    manna: Rc<RefCell<VecDeque<MannaMsg>>>,
+    /// A presentation Manna sent and is opening: the active document before it, and the slide
+    /// to start the show at once it has opened.
+    pending: Option<(Option<u64>, usize)>,
+    /// The last state told to Manna, so it hears only changes.
+    told: String,
+    /// A show Manna started: its on-screen tools stay hidden.
+    quiet: bool,
+}
+
+/// Manna (Manna's copy of DeckCraft, delosriosmedia/deckcraft): the page that frames this one, on
+/// the same origin, sends it `{deckcraft: "open", name, bytes, from}` (open a presentation and
+/// start the show at `from`), `{deckcraft: "key", key}` (a key of the show, by its egui name:
+/// "ArrowRight", "ArrowLeft", "Home"…), `{deckcraft: "goto", slide}` and `{deckcraft: "end"}`.
+/// This page tells it `{deckcraft: "ready", version}` once and `{deckcraft: "state", slide, step,
+/// ended, slides}` whenever the show moves (`slide` null while there is no show).
+enum MannaMsg {
+    Open { name: String, bytes: Vec<u8>, from: usize },
+    Key(egui::Key),
+    Goto(usize),
+    End,
+}
+
+fn listen_manna(ctx: egui::Context) -> Rc<RefCell<VecDeque<MannaMsg>>> {
+    let queue = Rc::new(RefCell::new(VecDeque::new()));
+    let Some(window) = web_sys::window() else { return queue };
+    let origin = window.location().origin().unwrap_or_default();
+    let q = queue.clone();
+    let on = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |e: web_sys::MessageEvent| {
+        if e.origin() != origin {
+            return;
+        }
+        let data = e.data();
+        let get = |k: &str| js_sys::Reflect::get(&data, &k.into()).ok().filter(|v| !v.is_undefined() && !v.is_null());
+        let number = |k: &str| get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0) as usize;
+        let msg = match get("deckcraft").and_then(|v| v.as_string()).as_deref() {
+            Some("open") => MannaMsg::Open {
+                name: get("name").and_then(|v| v.as_string()).unwrap_or_else(|| "manna.pptx".into()),
+                bytes: get("bytes").map(|b| js_sys::Uint8Array::new(&b).to_vec()).unwrap_or_default(),
+                from: number("from"),
+            },
+            Some("key") => match get("key").and_then(|v| v.as_string()).and_then(|k| egui::Key::from_name(&k)) {
+                Some(key) => MannaMsg::Key(key),
+                None => return,
+            },
+            Some("goto") => MannaMsg::Goto(number("slide")),
+            Some("end") => MannaMsg::End,
+            _ => return,
+        };
+        q.borrow_mut().push_back(msg);
+        ctx.request_repaint();
+    });
+    window.add_event_listener_with_callback("message", on.as_ref().unchecked_ref()).ok();
+    on.forget();
+    queue
+}
+
+fn tell_manna(v: &serde_json::Value) {
+    let Some(window) = web_sys::window() else { return };
+    let (Ok(Some(parent)), Ok(origin)) = (window.parent(), window.location().origin()) else { return };
+    if let Ok(msg) = js_sys::JSON::parse(&v.to_string()) {
+        parent.post_message(&msg, &origin).ok();
+    }
+}
+
+impl WebShell {
+    /// Run Manna's messages before the app's own pass.
+    fn manna_in(&mut self) {
+        let msgs: Vec<MannaMsg> = self.manna.borrow_mut().drain(..).collect();
+        for msg in msgs {
+            match msg {
+                MannaMsg::Open { name, bytes, from } => {
+                    let before = self.app.session.active().map(|d| d.uid);
+                    let id = self.app.begin_external_file("drop");
+                    push_inbox(&self.inbox, InboxEvent::File(InboxFile { id, name, bytes }));
+                    // The projector shows the audience's view, the slide alone, not the presenter's.
+                    self.app.ui.presenter_view = false;
+                    self.pending = Some((before, from));
+                }
+                MannaMsg::Key(key) if self.app.show.as_ref().is_some_and(|s| !s.ended) => self.press(key),
+                MannaMsg::Key(_) => {}
+                MannaMsg::Goto(slide) => {
+                    self.app.start_show(slide, false);
+                    self.quiet = true;
+                }
+                // Like the show's own Escape, so whatever is playing stops with it.
+                MannaMsg::End if self.app.show.is_some() => self.press(egui::Key::Escape),
+                MannaMsg::End => {}
+            }
+        }
+    }
+
+    fn press(&mut self, key: egui::Key) {
+        for pressed in [true, false] {
+            self.app.queue_input(egui::Event::Key { key, physical_key: None, pressed, repeat: false, modifiers: egui::Modifiers::NONE });
+        }
+    }
+
+    /// After the app's pass: start the show of a presentation that just opened, and tell Manna
+    /// where the show is when it moved.
+    fn manna_out(&mut self) {
+        if let Some((before, from)) = self.pending
+            && self.app.session.active().map(|d| d.uid) != before
+        {
+            self.pending = None;
+            self.app.start_show(from, false);
+            self.quiet = true;
+        }
+        if self.quiet && self.app.show.as_mut().is_none_or(|s| s.quiet()) {
+            self.quiet = false;
+        }
+        let slides = self.app.session.active().map(|d| d.doc.slides.len()).unwrap_or(0);
+        let state = match self.app.show.as_ref() {
+            Some(s) => serde_json::json!({ "deckcraft": "state", "slide": s.state.slide, "step": s.state.step, "ended": s.ended, "slides": slides }),
+            None => serde_json::json!({ "deckcraft": "state", "slide": null, "step": null, "ended": false, "slides": slides }),
+        };
+        let text = state.to_string();
+        if text != self.told {
+            tell_manna(&state);
+            self.told = text;
+        }
+    }
 }
 
 impl eframe::App for WebShell {
     /// Delegate one eframe logic pass to the wrapped application.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.manna_in();
         self.app.logic(ctx);
+        self.manna_out();
     }
 
     /// Consume browser drops with fresh input, capture the identity before the asynchronous read,

@@ -1,0 +1,55 @@
+# Manna's copy of DeckCraft (delosriosmedia/deckcraft): builds the web app, with the bridge Manna talks to
+# (apps/deckcraft-web/src/web.rs), and publishes it as a release Manna downloads at a fixed version, with its hash.
+name: Manna web
+
+on:
+  push:
+    tags: ['manna-web-*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: deckcraft
+      # The fonts DeckCraft draws with (Carlito for Calibri, Liberation for Arial…), at the pin of upstream's release.yml.
+      - uses: actions/checkout@v4
+        with:
+          repository: storytold/craft-fonts
+          ref: 37827adc41fd165f9a9234ac40f94dbad353aa69
+          path: craft-fonts
+      - name: Rust and trunk
+        run: |
+          rustup update stable
+          rustup target add wasm32-unknown-unknown
+          curl -sSfL https://github.com/trunk-rs/trunk/releases/download/v0.22.1/trunk-x86_64-unknown-linux-gnu.tar.gz | tar -xz -C "$HOME/.cargo/bin"
+      - name: Build
+        working-directory: deckcraft/apps/deckcraft-web
+        run: trunk build --release
+      - name: Package
+        run: |
+          mv deckcraft/dist/web deckcraft-web
+          cp deckcraft/LICENSE-MIT deckcraft/LICENSE-APACHE deckcraft/NOTICE deckcraft-web/
+          zip -qr deckcraft-web-manna.zip deckcraft-web
+          sha256sum deckcraft-web-manna.zip > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deckcraft-web-manna
+          path: |
+            deckcraft-web-manna.zip
+            SHA256SUMS.txt
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" deckcraft-web-manna.zip SHA256SUMS.txt -R "$GITHUB_REPOSITORY" \
+            --title "DeckCraft web for Manna ($GITHUB_REF_NAME)" \
+            --notes "DeckCraft's web app with the bridge Manna uses to run a slide show inside its projection window (open a presentation, next, previous, go to, and where the show is). Built from this tag with craft-fonts 37827ad. DeckCraft is © its authors, MIT or Apache-2.0."

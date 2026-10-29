@@ -357,6 +357,15 @@ impl Show {
         self.timer.elapsed(now)
     }
 
+    /// Manna: hide the on-screen tools of a show a projector runs, which no pointer has woken. True once the show has
+    /// started (before that, its start wakes them again).
+    pub fn quiet(&mut self) -> bool {
+        if self.started {
+            self.last_move = f64::NEG_INFINITY;
+        }
+        self.started
+    }
+
     /// True while the pointer moved in the last 2.5 s; the media controls and GIF button hide after that.
     fn pointer_awake(&self, now: f64) -> bool {
         now - self.last_move < 2.5
