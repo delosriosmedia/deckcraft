@@ -123,7 +123,9 @@ fn listen_manna(ctx: egui::Context) -> Rc<RefCell<VecDeque<MannaMsg>>> {
                 name: get("name").and_then(|v| v.as_string()).unwrap_or_else(|| "manna.pptx".into()),
                 bytes: get("bytes").map(|b| js_sys::Uint8Array::new(&b).to_vec()).unwrap_or_default(),
                 from: number("from"),
-                fonts: get("fonts").map(|v| js_sys::Array::from(&v).iter().map(|b| js_sys::Uint8Array::new(&b).to_vec()).collect()).unwrap_or_default(),
+                fonts: get("fonts")
+                    .map(|v| js_sys::Array::from(&v).iter().map(|b| js_sys::Uint8Array::new(&b).to_vec()).collect())
+                    .unwrap_or_default(),
             },
             Some("key") => match get("key").and_then(|v| v.as_string()).and_then(|k| egui::Key::from_name(&k)) {
                 Some(key) => MannaMsg::Key(key),
@@ -206,7 +208,9 @@ impl WebShell {
             .map(|d| (d.doc.slides.len(), d.doc.slides.iter().enumerate().filter(|(_, s)| s.hidden).map(|(i, _)| i).collect::<Vec<_>>()))
             .unwrap_or_default();
         let state = match self.app.show.as_ref() {
-            Some(s) => serde_json::json!({ "deckcraft": "state", "slide": s.state.slide, "step": s.state.step, "ended": s.ended, "slides": slides, "hidden": hidden }),
+            Some(s) => {
+                serde_json::json!({ "deckcraft": "state", "slide": s.state.slide, "step": s.state.step, "ended": s.ended, "slides": slides, "hidden": hidden })
+            }
             None => serde_json::json!({ "deckcraft": "state", "slide": null, "step": null, "ended": false, "slides": slides, "hidden": hidden }),
         };
         let text = state.to_string();
