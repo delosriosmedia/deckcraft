@@ -151,9 +151,9 @@ Detail in [file-format-parity.md](file-format-parity.md).
 - **Estimate:** 10–16 h (render the timeline frame by frame, which the GIF can then reuse for
   transitions and builds; an H.264 encoder is the hard part, FilmCraft has one to copy).
 
-### Embedded MicroType Express faces from writers other than PowerPoint may not draw
-- **Evidence:** `p:embeddedFontLst` is read and written. TrueType, OpenType and Embedded OpenType faces are drawn, also MicroType Express compressed (and XOR-obfuscated) ones: `deckcraft_fonts::embedded_sfnt` rebuilds them as TrueType (`crates/fonts/src/mtx.rs`), checked glyph by glyph against the original fonts of a PowerPoint deck. For point flags 20–119 the W3C submission's triplet table disagrees with what PowerPoint writes; only PowerPoint's form is known, so a face with other flags there is refused and its text uses a stand-in, as before. `hdmx` and `VDMX` are dropped, not decoded (nothing here reads them).
-- **Impact:** a deck whose embedded faces another tool compressed may reflow until the face is installed.
+### Embedded MicroType Express faces in the second point layout may not draw
+- **Evidence:** `p:embeddedFontLst` is read and written. TrueType, OpenType and Embedded OpenType faces are drawn, also MicroType Express compressed (and XOR-obfuscated) ones: `deckcraft_fonts::embedded_sfnt` rebuilds them as TrueType (`crates/fonts/src/mtx.rs`). 41 compressed faces from four decks decode, and where the original font is the same version every glyph matches it. Points follow the W3C submission's triplet table (the one WOFF2 adopted), except two faces of one Mac PowerPoint deck that use another layout; of that layout only the flags those faces use are known, so a face with others is refused and its text uses a stand-in. `hdmx` and `VDMX` are dropped, not decoded (nothing here reads them).
+- **Impact:** a deck whose faces use the second layout with unseen flags reflows until the face is installed.
 - **Estimate:** 1–2 h once such a file is at hand.
 
 ## Features
@@ -372,7 +372,7 @@ Detail in [localization-parity.md](localization-parity.md).
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-29 | minor | Embedded MicroType Express faces are rebuilt as TrueType and drawn; the entry now covers only point flags PowerPoint doesn't write |
+| 2026-10-29 | minor | Embedded MicroType Express faces are rebuilt as TrueType and drawn; the entry now covers only unseen flags of the second point layout |
 | 2026-10-25 | trivial | New entries: copying text and cell ranges (no media, no table), a control-server timing test that may fail under load; Proofing notes that automatic lists follow Replace text as you type and that Backspace puts the typed lead back |
 | 2026-10-24 | trivial | AutoFormat starts bulleted and numbered lists as you type (`* `, `-- `, `> `, `1. `, `a) ` and the rest), with an AutoCorrect option to turn it off |
 | 2026-10-22 | minor | Animation Pane ▸ Play From starts the preview at the selected effect; gap 10 keeps the effect gallery (7–13 h) |

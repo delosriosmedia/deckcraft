@@ -327,7 +327,7 @@ fn ctf_to_sfnt(ctf: &[u8], push: &[u8], code: &[u8]) -> Option<Vec<u8>> {
     let table = |tag: &[u8; 4]| tables.iter().find(|t| &t.0 == tag).map(|t| t.1.as_slice());
     let num_glyphs = usize::from(u16::from_be_bytes(table(b"maxp")?.get(4..6)?.try_into().ok()?));
     let mut glyphs = match table(b"glyf") {
-        Some(g) => Some(glyf(g, num_glyphs, push, code)?),
+        Some(g) => Some(glyf(g, num_glyphs, push, code, Layout::Submission).or_else(|| glyf(g, num_glyphs, push, code, Layout::Other))?),
         None => None,
     };
     // shortcut: hdmx and VDMX (device-metric caches no renderer here reads) are dropped, not
@@ -368,9 +368,9 @@ struct Glyphs {
 }
 
 /// Turn the compact glyphs back into TrueType ones (§5.6 to §5.11, §6, §7), with long `loca`
-/// offsets.
-fn glyf(data: &[u8], num_glyphs: usize, push: &[u8], code: &[u8]) -> Option<Glyphs> {
-    let mut src = Glyph { g: Cur { b: data, i: 0 }, push: Cur { b: push, i: 0 }, code: Cur { b: code, i: 0 } };
+/// offsets. The three streams must be used up exactly: that is how a wrong [`Layout`] shows.
+fn glyf(data: &[u8], num_glyphs: usize, push: &[u8], code: &[u8], layout: Layout) -> Option<Glyphs> {
+    let mut src = Glyph { g: Cur { b: data, i: 0 }, push: Cur { b: push, i: 0 }, code: Cur { b: code, i: 0 }, layout };
     let mut out = Glyphs { glyf: Vec::new(), loca: Vec::with_capacity(4 * (num_glyphs + 1)), max_instructions: 0 };
     for _ in 0..num_glyphs {
         out.loca.extend(u32::try_from(out.glyf.len()).ok()?.to_be_bytes());
@@ -382,14 +382,29 @@ fn glyf(data: &[u8], num_glyphs: usize, push: &[u8], code: &[u8]) -> Option<Glyp
         }
     }
     out.loca.extend(u32::try_from(out.glyf.len()).ok()?.to_be_bytes());
-    Some(out)
+    let padding = data.get(src.g.i..)?.iter().all(|b| *b == 0);
+    (padding && src.push.i == push.len() && src.code.i == code.len()).then_some(out)
 }
 
-/// The three streams a glyph is read from.
+/// The three streams a glyph is read from, and how its points are coded.
 struct Glyph<'a> {
     g: Cur<'a>,
     push: Cur<'a>,
     code: Cur<'a>,
+    layout: Layout,
+}
+
+/// How point flags 20 to 119 are coded.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// The submission's table (§5.11), the one WOFF2 adopted: what almost every file uses.
+    Submission,
+    /// Another one, met in a Mac PowerPoint deck whose two faces then matched their original fonts
+    /// glyph by glyph: the one-byte form with 4 bits each for x and y, x from 1, at
+    /// `60 + 16 * k + 5 * signs`, y from `1 + 16 * k`. shortcut: nothing else was seen there, so
+    /// other flags are refused (the face then draws in a stand-in); learn them if a file with them
+    /// turns up.
+    Other,
 }
 
 impl Glyph<'_> {
@@ -403,11 +418,8 @@ impl Glyph<'_> {
             // An empty glyph is just its contour count.
             return Some(0);
         }
-        let (contours, bbox) = if contours == 0x7FFF {
-            (self.g.i16()?, Some([self.g.i16()?, self.g.i16()?, self.g.i16()?, self.g.i16()?]))
-        } else {
-            (contours, None)
-        };
+        let (contours, bbox) =
+            if contours == 0x7FFF { (self.g.i16()?, Some([self.g.i16()?, self.g.i16()?, self.g.i16()?, self.g.i16()?])) } else { (contours, None) };
         let mut ends = Vec::with_capacity(usize::try_from(contours).ok()?);
         for i in 0..contours {
             let v = self.g.u255()?;
@@ -420,7 +432,7 @@ impl Glyph<'_> {
         let mut ys = Vec::with_capacity(2 * points);
         let mut bounds = [i32::MAX, i32::MAX, i32::MIN, i32::MIN];
         for &f in flags {
-            let (dx, dy) = triplet(f & 0x7F, &mut self.g)?;
+            let (dx, dy) = triplet(f & 0x7F, &mut self.g, self.layout)?;
             xs.extend(i16::try_from(dx).ok()?.to_be_bytes());
             ys.extend(i16::try_from(dy).ok()?.to_be_bytes());
             (x, y) = (x + dx, y + dy);
@@ -546,24 +558,26 @@ fn push_instructions(values: &[i16]) -> Vec<u8> {
 
 /// One point's (dx, dy) from its flag byte (on-curve bit removed) and the bytes after it
 /// (§5.11). The low two bits are the signs of x and y (set: positive).
-///
-/// For flags 20 to 119 the submission's table (later WOFF2's) does not match what PowerPoint
-/// writes: checked point by point against the original fonts, PowerPoint's one-byte form with 4
-/// bits each for x and y and x from 1 sits at `60 + 16 * k + 5 * signs`, y from `1 + 16 * k`; it
-/// writes nothing else there. shortcut: other flags there are refused (the font then draws in a
-/// stand-in, as before); learn them if a file with them turns up.
-fn triplet(f: u8, g: &mut Cur) -> Option<(i32, i32)> {
+fn triplet(f: u8, g: &mut Cur, layout: Layout) -> Option<(i32, i32)> {
     let sign = |bit: u8, v: i32| if bit & 1 == 1 { v } else { -v };
     let byte = |g: &mut Cur| g.u8().map(i32::from);
-    Some(match f {
-        0..10 => (0, sign(f, (i32::from(f & 14) << 7) + byte(g)?)),
-        10..20 => (sign(f, (i32::from((f - 10) & 14) << 7) + byte(g)?), 0),
-        60..120 if (f - 60) % 16 == 5 * (f & 3) => {
+    Some(match (f, layout) {
+        (0..10, _) => (0, sign(f, (i32::from(f & 14) << 7) + byte(g)?)),
+        (10..20, _) => (sign(f, (i32::from((f - 10) & 14) << 7) + byte(g)?), 0),
+        (20..84, Layout::Submission) => {
+            let (k, b) = (i32::from(f - 20), byte(g)?);
+            (sign(f, 1 + (k & 0x30) + (b >> 4)), sign(f >> 1, 1 + ((k & 0x0C) << 2) + (b & 15)))
+        }
+        (84..120, Layout::Submission) => {
+            let (k, b0, b1) = (i32::from(f - 84), byte(g)?, byte(g)?);
+            (sign(f, 1 + ((k / 12) << 8) + b0), sign(f >> 1, 1 + (((k % 12) >> 2) << 8) + b1))
+        }
+        (60..120, Layout::Other) if (f - 60) % 16 == 5 * (f & 3) => {
             let b = byte(g)?;
             (sign(f, 1 + (b >> 4)), sign(f >> 1, 1 + 16 * i32::from((f - 60) / 16) + (b & 15)))
         }
-        20..120 => return None,
-        120..124 => {
+        (20..120, Layout::Other) => return None,
+        (120..124, _) => {
             let (b0, b1, b2) = (byte(g)?, byte(g)?, byte(g)?);
             (sign(f, (b0 << 4) + (b1 >> 4)), sign(f >> 1, ((b1 & 15) << 8) + b2))
         }
@@ -673,6 +687,16 @@ mod tests {
     }
 
     #[test]
+    fn both_point_layouts_decode() {
+        let point = |f, b: &[u8], layout| triplet(f, &mut Cur { b, i: 0 }, layout);
+        assert_eq!(point(25, &[0x7C], Layout::Submission), Some((8, -29)));
+        assert_eq!(point(84, &[5, 6], Layout::Submission), Some((-6, -7)));
+        assert_eq!(point(81, &[0x7C], Layout::Other), Some((8, -29)));
+        assert_eq!(point(25, &[0x7C], Layout::Other), None);
+        assert_eq!(point(124, &[0, 150, 0, 1], Layout::Other), Some((-150, -1)));
+    }
+
+    #[test]
     fn the_run_length_layer_expands_runs_and_escaped_escapes() {
         assert_eq!(run_length_decode(&[9, 1, 9, 0, 9, 3, 7, 2]).as_deref(), Some(&[1, 9, 7, 7, 7, 2][..]));
         assert!(run_length_decode(&[9, 1, 9]).is_none());
@@ -682,10 +706,10 @@ mod tests {
     fn hop_codes_repeat_the_value_two_back_and_pushes_are_rebuilt() {
         // 7 1 Hop3(2) → 7 1 7 2 7; then a word and a negative value; then the code (CALL).
         let push = [7, 1, 251, 2, 253, 0x12, 0x34, 250, 9];
-        let mut g = Glyph { g: Cur { b: &[7, 1], i: 0 }, push: Cur { b: &push, i: 0 }, code: Cur { b: &[0x2B], i: 0 } };
+        let mut g = Glyph { g: Cur { b: &[7, 1], i: 0 }, push: Cur { b: &push, i: 0 }, code: Cur { b: &[0x2B], i: 0 }, layout: Layout::Submission };
         assert_eq!(g.instructions(), Some(vec![0xB4, 7, 1, 7, 2, 7, 0xB9, 0x12, 0x34, 0xFF, 0xF7, 0x2B]));
         // A hop code with fewer than two values before it is damaged data.
-        let mut g = Glyph { g: Cur { b: &[3, 0], i: 0 }, push: Cur { b: &[251, 1], i: 0 }, code: Cur { b: &[], i: 0 } };
+        let mut g = Glyph { g: Cur { b: &[3, 0], i: 0 }, push: Cur { b: &[251, 1], i: 0 }, code: Cur { b: &[], i: 0 }, layout: Layout::Submission };
         assert_eq!(g.instructions(), None);
     }
 
