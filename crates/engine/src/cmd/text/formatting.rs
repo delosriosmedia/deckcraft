@@ -196,7 +196,7 @@ pub(super) fn replace_font(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let n = s.edit(|doc, _| Ok(crate::fonts::replace_font(doc, &from, &to)))?;
     let st = s.doc_mut()?;
-    st.missing_fonts = crate::fonts::missing_fonts(&st.doc);
+    st.missing_fonts = crate::fonts::missing_fonts(deckcraft_fonts::FontDb::global(), &st.doc);
     Ok(json!({"replaced": n}))
 }
 

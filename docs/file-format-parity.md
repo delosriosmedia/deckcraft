@@ -1,6 +1,6 @@
 # File-format parity with PowerPoint
 
-> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-18 · **Change:** minor (native chart payloads stored in bounded ZIP members; previous: major, community PR wave 2026-10-14: seven owned PPTX corpus files, embedded fonts, EMF/WMF clip regions, threaded comments (#70), chart trendlines and workbooks (#335), SmartArt written as a diagram, tags and custom XML kept, picture export DPI; duplicated rows and headers folded; previous: trivial, lines in scaled groups, #233) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
+> **Last reviewed:** 2026-10-14 · **Last updated:** 2026-10-29 · **Change:** minor (MicroType Express embedded faces drawn; previous: minor, native chart payloads stored in bounded ZIP members; previous: major, community PR wave 2026-10-14: seven owned PPTX corpus files, embedded fonts, EMF/WMF clip regions, threaded comments (#70), chart trendlines and workbooks (#335), SmartArt written as a diagram, tags and custom XML kept, picture export DPI; duplicated rows and headers folded; previous: trivial, lines in scaled groups, #233) · **Target:** Microsoft PowerPoint for Mac 16.113 (Microsoft 365)
 
 Every format PowerPoint reads or writes, DeckCraft's support, fidelity and how it is tested.
 Gaps are itemized in [gaps.md](gaps.md#file-formats). Dimension score: **~58% ready**
@@ -63,7 +63,7 @@ intermediate build that required inline `bytes` cannot read the new referenced r
 | WMV | yes (Windows) | embedded, not playable | |
 | Online video (YouTube embeds) | yes | no | Cloud feature |
 | Embedded OLE objects | yes | kept on round trip (opaque), not insertable or editable | `ShapeKind::Opaque` |
-| Embedded fonts | yes | yes | `p:embeddedFontLst` read and written. TrueType, OpenType and Embedded OpenType faces are used to draw; MicroType Express subsets are kept and written back, not drawn |
+| Embedded fonts | yes | yes | `p:embeddedFontLst` read and written. TrueType, OpenType and Embedded OpenType faces are used to draw, also MicroType Express compressed ones (rebuilt as TrueType; `hdmx`/`VDMX` dropped); the part is written back as it was |
 | 3-D models (`.glb`) | yes | kept | The model part round-trips (`p:contentPart`, including an `mc:AlternateContent` choice and its fallback picture). Not drawn as a mesh and not inserted from the ribbon |
 
 ## PPTX coverage (PresentationML / DrawingML)
@@ -99,7 +99,7 @@ the round trip even though DeckCraft doesn't model it.
 | Comments: legacy | yes | yes | |
 | Comments: modern threaded (`p188`) | yes | yes | Written next to the flattened legacy part; replies and resolved state round-trip (`threads_and_resolved_round_trip`) |
 | Unknown slide-level elements (`graphicFrame` OLE, extensions, `mc:AlternateContent`) | kept | kept | Rendered as a labelled placeholder with the preview picture when present |
-| Embedded fonts | yes | yes | MicroType Express subsets kept, not drawn |
+| Embedded fonts | yes | yes | MicroType Express faces rebuilt and drawn (41 faces from four decks checked); a rare second point layout is only partly known (see gaps) |
 | Tags (`p:custDataLst`) on the presentation, slides and shapes | yes | yes | Add-ins such as think-cell keep their identity; `tags_survive_round_trip` |
 | Custom XML data, sensitivity label (`docMetadata/LabelInfo.xml`), custom document properties | kept verbatim | yes | SharePoint metadata and the label survive a save; `custom_xml_label_and_custom_properties_survive_save` |
 | VBA | no | no | |
@@ -119,6 +119,7 @@ the round trip even though DeckCraft doesn't model it.
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | Embedded fonts: MicroType Express compressed faces (EOT `TTEMBED_TTCOMPRESSED`, also XOR-obfuscated) are rebuilt as TrueType and drawn |
 | 2026-10-18 | minor | Native chart payloads use referenced ZIP members and share media byte/item limits; old inline sidecars remain readable. Synthetic tests cover multi-megabyte layout, all shape owners, shared budgets, missing/corrupt members and invalid references. Scores and milestone scope unchanged |
 | 2026-10-15 | trivial | Native `.deckcraft` files serialize a nonempty chart `kept` sidecar (relationships, part names, content types and bytes). Older files without it still load; empty sidecars are omitted. Headless PPTX → edit → native save/reopen → PPTX checks keep the workbook and drawing bytes; editing chart data still drops the stale workbook |
 | 2026-10-15 | trivial | PPTX interactive timing sequences keep later On Click steps and paragraph click builds (`trigger_steps.rs`); mixed starts and independent buttons survive import/edit/save/reopen |
