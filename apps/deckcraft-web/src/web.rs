@@ -92,14 +92,15 @@ struct WebShell {
 }
 
 /// Manna (Manna's copy of DeckCraft, delosriosmedia/deckcraft): the page that frames this one, on
-/// the same origin, sends it `{deckcraft: "open", name, bytes, from}` (open a presentation and
-/// start the show at `from`), `{deckcraft: "key", key}` (a key of the show, by its egui name:
+/// the same origin, sends it `{deckcraft: "open", name, bytes, from, fonts}` (open a presentation and
+/// start the show at `from`; `fonts`, the font files of the computer its text is set in, which the
+/// web build can't read from the system), `{deckcraft: "key", key}` (a key of the show, by its egui name:
 /// "ArrowRight", "ArrowLeft", "Home"…), `{deckcraft: "goto", slide}` and `{deckcraft: "end"}`.
 /// This page tells it `{deckcraft: "ready", version}` once and `{deckcraft: "state", slide, step,
 /// ended, slides, hidden}` whenever the show moves (`slide` null while there is no show; `hidden`, the
 /// indices of the hidden slides, which the show skips).
 enum MannaMsg {
-    Open { name: String, bytes: Vec<u8>, from: usize },
+    Open { name: String, bytes: Vec<u8>, from: usize, fonts: Vec<Vec<u8>> },
     Key(egui::Key),
     Goto(usize),
     End,
@@ -122,6 +123,7 @@ fn listen_manna(ctx: egui::Context) -> Rc<RefCell<VecDeque<MannaMsg>>> {
                 name: get("name").and_then(|v| v.as_string()).unwrap_or_else(|| "manna.pptx".into()),
                 bytes: get("bytes").map(|b| js_sys::Uint8Array::new(&b).to_vec()).unwrap_or_default(),
                 from: number("from"),
+                fonts: get("fonts").map(|v| js_sys::Array::from(&v).iter().map(|b| js_sys::Uint8Array::new(&b).to_vec()).collect()).unwrap_or_default(),
             },
             Some("key") => match get("key").and_then(|v| v.as_string()).and_then(|k| egui::Key::from_name(&k)) {
                 Some(key) => MannaMsg::Key(key),
@@ -153,7 +155,11 @@ impl WebShell {
         let msgs: Vec<MannaMsg> = self.manna.borrow_mut().drain(..).collect();
         for msg in msgs {
             match msg {
-                MannaMsg::Open { name, bytes, from } => {
+                MannaMsg::Open { name, bytes, from, fonts } => {
+                    // Before the file, so its text is laid out with them from the start.
+                    for font in fonts {
+                        deckcraft_fonts::FontDb::global().add_font(font);
+                    }
                     let before = self.app.session.active().map(|d| d.uid);
                     let id = self.app.begin_external_file("drop");
                     push_inbox(&self.inbox, InboxEvent::File(InboxFile { id, name, bytes }));
