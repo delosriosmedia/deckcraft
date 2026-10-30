@@ -1445,6 +1445,89 @@ fn an_embedded_face_is_used_when_the_machine_lacks_it() {
     assert!(font.regular.is_some());
 }
 
+/// A real deck whose two embedded faces (Lilita One and Caveat Brush, both OFL) PowerPoint stored
+/// as MicroType Express. Files PowerPoint wrote aren't committed (AGENTS.md §1.1), so the tests
+/// that need it skip unless it is at `DECKCRAFT_MTX_DECK` or in ~/Downloads.
+fn micro_type_express_deck() -> Option<deckcraft_model::Presentation> {
+    let path = std::env::var("DECKCRAFT_MTX_DECK")
+        .ok()
+        .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/Downloads/CantoTemaSJ - Sept 2026.pptx")))?;
+    if !std::path::Path::new(&path).exists() {
+        eprintln!("skipped: no MicroType Express deck at {path}");
+        return None;
+    }
+    Some(crate::cmd::file::read_presentation_file(&path).unwrap().doc)
+}
+
+/// Each embedded face of `p`: its typeface and its part bytes.
+fn embedded_faces(p: &deckcraft_model::Presentation) -> Vec<(String, Vec<u8>)> {
+    p.embedded_fonts.iter().map(|f| (f.typeface.clone(), p.media(f.regular.unwrap()).unwrap().data.to_vec())).collect()
+}
+
+#[test]
+fn micro_type_express_faces_load_with_their_family() {
+    let Some(p) = micro_type_express_deck() else { return };
+    let mut families = Vec::new();
+    for (family, part) in embedded_faces(&p) {
+        let sfnt = deckcraft_fonts::embedded_sfnt(&part).expect("the MicroType Express face");
+        assert!(matches!(sfnt, std::borrow::Cow::Owned(_)), "rebuilt, not the part itself");
+        let db = deckcraft_fonts::FontDb::with_font_dirs(vec![]);
+        assert_eq!(db.add_font(sfnt.into_owned()), 1, "{family}");
+        assert!(db.has_family(&family), "{family}");
+        families.push(family);
+        // Damaged copies give none or a font, never a panic or a hang.
+        for cut in [11, 100, part.len() / 2, part.len() - 1] {
+            let _ = deckcraft_fonts::embedded_sfnt(&part[..cut]);
+        }
+        for i in (82..part.len()).step_by(1499) {
+            let mut bad = part.clone();
+            bad[i] ^= 0x5A;
+            let _ = deckcraft_fonts::embedded_sfnt(&bad);
+        }
+    }
+    families.sort();
+    assert_eq!(families, ["Caveat Brush", "Lilita One"]);
+}
+
+/// The rebuilt faces against the originals (macOS user fonts folder; skipped if absent): the same
+/// characters, advances and outlines.
+#[test]
+fn micro_type_express_faces_match_the_original_fonts() {
+    let Some(p) = micro_type_express_deck() else { return };
+    let home = std::env::var("HOME").unwrap_or_default();
+    for (family, part) in embedded_faces(&p) {
+        let file = format!("{home}/Library/Fonts/{}-Regular.ttf", family.replace(' ', ""));
+        let Ok(original) = std::fs::read(&file) else {
+            eprintln!("skipped: {file} not found");
+            continue;
+        };
+        let (ours, theirs) = (deckcraft_fonts::FontDb::with_font_dirs(vec![]), deckcraft_fonts::FontDb::with_font_dirs(vec![]));
+        ours.add_font(deckcraft_fonts::embedded_sfnt(&part).unwrap().into_owned());
+        theirs.add_font(original);
+        let (a, b) = (ours.face(&family, "Regular"), theirs.face(&family, "Regular"));
+        assert_eq!((a.family.as_str(), b.family.as_str()), (family.as_str(), family.as_str()));
+        let chars = a.chars();
+        assert!(chars.len() > 90, "{family}: {} characters", chars.len());
+        assert_eq!(chars, b.chars(), "{family}");
+        for (c, gid) in chars {
+            assert_eq!(a.advance(gid), b.advance(gid), "{family} {c:?}");
+            assert_eq!(*ours.outline(&a, gid), *theirs.outline(&b, gid), "{family} {c:?}");
+        }
+    }
+}
+
+#[test]
+fn a_deck_with_micro_type_express_faces_does_not_list_them_missing() {
+    let Some(p) = micro_type_express_deck() else { return };
+    let db = deckcraft_fonts::FontDb::with_font_dirs(vec![]);
+    let embedded = ["Caveat Brush", "Lilita One"];
+    let before = crate::fonts::missing_fonts(&db, &p);
+    assert!(embedded.iter().all(|f| before.iter().any(|m| m == f)), "{before:?}");
+    crate::fonts::install_embedded_fonts(&db, &p);
+    let after = crate::fonts::missing_fonts(&db, &p);
+    assert!(!after.iter().any(|m| embedded.contains(&m.as_str())), "{after:?}");
+}
+
 #[test]
 fn clicks_in_flipped_shapes_hit_the_text_where_it_is_drawn() {
     // Flips don't mirror text, so a click lands on the character drawn under it.

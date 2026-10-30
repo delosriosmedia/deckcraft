@@ -10,6 +10,7 @@
 
 mod fallback;
 mod fontdb;
+mod mtx;
 pub mod script;
 mod shape;
 
@@ -44,10 +45,11 @@ pub fn japanese_fonts() -> impl Iterator<Item = &'static CraftFont> {
 /// (`application/x-fontdata`).
 ///
 /// The part is the font itself, or an Embedded OpenType wrapper around it (the `0x504C` magic
-/// at byte 34, from the W3C Embedded OpenType submission). A MicroType Express subset is neither,
-/// so this returns none; the original part stays in the file for the round trip.
-pub fn embedded_sfnt(part: &[u8]) -> Option<&[u8]> {
-    eot_payload(part).or_else(|| sfnt_or_collection(part).then_some(part))
+/// at byte 34, from the W3C Embedded OpenType submission), whose font may be XOR-obfuscated and
+/// MicroType Express compressed (rebuilt here as TrueType). The original part stays in the file
+/// for the round trip.
+pub fn embedded_sfnt(part: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
+    eot_payload(part).or_else(|| sfnt_or_collection(part).then_some(std::borrow::Cow::Borrowed(part)))
 }
 
 fn sfnt_or_collection(b: &[u8]) -> bool {
@@ -60,7 +62,7 @@ fn sfnt_or_collection(b: &[u8]) -> bool {
 }
 
 /// Font data at the end of an Embedded OpenType blob, when the header is one.
-fn eot_payload(b: &[u8]) -> Option<&[u8]> {
+fn eot_payload(b: &[u8]) -> Option<std::borrow::Cow<'_, [u8]>> {
     if b.len() < 82 || u16::from_le_bytes([b[34], b[35]]) != 0x504C {
         return None;
     }
@@ -73,8 +75,17 @@ fn eot_payload(b: &[u8]) -> Option<&[u8]> {
     if font_size < 12 || eot_size < font_size.saturating_add(82) || eot_size > b.len() {
         return None;
     }
-    let font = b.get(eot_size - font_size..eot_size)?;
-    sfnt_or_collection(font).then_some(font)
+    let mut font = std::borrow::Cow::Borrowed(b.get(eot_size - font_size..eot_size)?);
+    let flags = u32::from_le_bytes(b.get(12..16)?.try_into().ok()?);
+    if flags & 0x1000_0000 != 0 {
+        // TTEMBED_XORENCRYPTDATA
+        font = font.iter().map(|x| x ^ 0x50).collect::<Vec<_>>().into();
+    }
+    if flags & 0x4 != 0 && !sfnt_or_collection(&font) {
+        // TTEMBED_TTCOMPRESSED (a plain font with the flag still loads, as it always did)
+        font = mtx::decompress(&font)?.into();
+    }
+    sfnt_or_collection(&font).then_some(font)
 }
 
 /// Japanese faces in document-fallback order: Mincho (serif) families first, matching the
